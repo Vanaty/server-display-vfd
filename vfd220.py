@@ -137,7 +137,7 @@ class VFD220:
                     display_lines.append(line)
                 else:
                     display_lines.append(' ' * self.display_width)  # Empty line
-            
+            self.clear_display()
             for m in display_lines:
                 self.send_text(m)
             self.logger.debug(f"Sent multiline text: {display_lines}")

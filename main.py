@@ -1,17 +1,16 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import serial
-import time
 import logging
 import os
 import threading
-from contextlib import contextmanager
-from typing import List, Dict, Optional
+from typing import List, Dict
 from vfd220 import VFD220
 
+WELCOME_MESSAGE = " CAISSE ILO MARKET  Pret a vous servir !"
 # Global variable to track current display thread
 current_display_thread = None
 stop_display_event = threading.Event()
+orders = []
 
 def test_vfd_display() -> bool:
     """Test VFD display connection"""
@@ -22,7 +21,7 @@ def test_vfd_display() -> bool:
             return False
         
         vfd.clear_display()
-        vfd.send_text("Bonjour a vous !")
+        vfd.send_text(WELCOME_MESSAGE)
         return True
     except Exception as e:
         logging.error(f"Error during VFD display test: {e}")
@@ -63,8 +62,35 @@ logger = setup_logger()
 app = Flask(__name__)
 CORS(app)
 
+def money_format(value: float) -> str:
+    """Format a float value as money with thousands separator"""
+    return f"{value:,.0f}".replace(',', ' ')
+
+def name_format(name: str) -> str:
+    """Format name to fit VFD display constraints"""
+    if len(name) >= 7:
+        return str(name[:7])
+    return name.ljust(5)
+
+def timer_thread(stop_event: threading.Event) -> None:
+    """Thread to handle periodic tasks"""
+    t = 0
+    while not stop_event.is_set():
+        try:
+            if t > 10:
+                stop_event.set()
+            t += 1
+            pass
+        except Exception as e:
+            logger.error(f"Error in timer thread: {e}")
+        finally:
+            stop_event.wait(1)  # Wait for 1 second before next iteration
 def display_order_thread(order: List[Dict[str, str]], stop_event: threading.Event) -> None:
     """Display order on VFD in a separate thread"""
+    # timer_thread(stop_event)
+    if orders != order:
+        orders.clear()
+        orders.extend(order)
     vfd = VFD220()
     if not vfd.connect():
         logger.error("Failed to connect to VFD display")
@@ -74,15 +100,15 @@ def display_order_thread(order: List[Dict[str, str]], stop_event: threading.Even
         vfd.clear_display()
         line = ""
         total = 0
-        for item in order:
-            line += "\n" + f"{item.get('name', '')} {item.get('quantity', '')} {item.get('price', '')}"
-            total += float(item.get('price', 0)) * int(item.get('quantity', 1))
+        for item in orders:
+            line = f"{name_format(item.get("name"))}: {money_format(float(item.get('price', 0)) * int(item.get('quantity', 1)))} Ar"
+            # vfd.clear_display()
+            total += round(float(item.get('price', 0)) * int(item.get('quantity', 1)))
         # total avec separation de milliers
-        total = f"{total:,.0f}".replace(',', ' ')
-        line += f"\nTOTAL={total} Ar"
-        
-        # Display with stop event check
-        vfd.scroll_text_boucle(line, scroll_speed=0.5, scroll_all_lines=False,stop_event = stop_event)
+        total = money_format(total)
+        line += f"\nTOTAL = {total} Ar"
+        vfd.send_multiline_text(line.split('\n'))
+        # vfd.scroll_text_boucle(line, scroll_speed=0.2, scroll_all_lines=False,stop_event = stop_event)
         
     except Exception as e:
         logger.error(f"Error displaying order: {e}")
@@ -94,13 +120,11 @@ def display_order_on_vfd(order: List[Dict[str, str]]) -> bool:
     global current_display_thread, stop_display_event
     
     try:
-        # Stop previous display if running
         if current_display_thread and current_display_thread.is_alive():
             logger.info("Stopping previous display")
             stop_display_event.set()
             current_display_thread.join(timeout=2)
         
-        # Create new stop event and thread
         stop_display_event = threading.Event()
         current_display_thread = threading.Thread(
             target=display_order_thread,
@@ -115,6 +139,31 @@ def display_order_on_vfd(order: List[Dict[str, str]]) -> bool:
     except Exception as e:
         logger.error(f"Error starting display thread: {e}")
         return False
+
+def display_welcomme_message() -> None:
+    """Display welcome message on VFD"""
+    vfd = VFD220()
+    if not vfd.connect():
+        logger.error("Failed to connect to VFD display")
+        return
+    
+    try:
+        vfd.clear_display()
+        vfd.send_text(WELCOME_MESSAGE)
+    except Exception as e:
+        logger.error(f"Error displaying welcome message: {e}")
+    finally:
+        vfd.disconnect()
+
+@app.route('/api/welcome', methods=['GET'])
+def welcome():
+    """API endpoint to display welcome message"""
+    try:
+        display_welcomme_message()
+        return jsonify({"status": "success", "message": "Welcome message displayed"}), 200
+    except Exception as e:
+        logger.error(f"Error displaying welcome message: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/receive_order', methods=['POST'])
 def receive_order():
