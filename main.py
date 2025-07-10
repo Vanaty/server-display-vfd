@@ -3,31 +3,15 @@ from flask_cors import CORS
 import logging
 import os
 import threading
-from typing import List, Dict
+import time
+from typing import List, Dict, Optional
 from vfd220 import VFD220
 
 WELCOME_MESSAGE = " CAISSE ILO MARKET  Pret a vous servir !"
-# Global variable to track current display thread
-current_display_thread = None
-stop_display_event = threading.Event()
-orders = []
+VFD_TIMEOUT = 5  # seconds
+DISPLAY_TIMEOUT = 10  # seconds
 
-def test_vfd_display() -> bool:
-    """Test VFD display connection"""
-    vfd = VFD220()
-    try:
-        if not vfd.connect():
-            logging.error("Failed to connect to VFD display")
-            return False
-        
-        vfd.clear_display()
-        vfd.send_text(WELCOME_MESSAGE)
-        return True
-    except Exception as e:
-        logging.error(f"Error during VFD display test: {e}")
-        return False
-
-def setup_logger():
+def setup_logger() -> logging.Logger:
     """Configure logger with file and console handlers"""
     if not os.path.exists('logs'):
         os.makedirs('logs')
@@ -59,111 +43,216 @@ def setup_logger():
 
 logger = setup_logger()
 
+
+class VFDManager:
+    """Manages a single persistent VFD display connection with thread safety"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._vfd = VFD220()
+        self._connected = False
+        self._connect()
+
+    def _connect(self):
+        """Establish connection if not already connected"""
+        if not self._connected:
+            try:
+                self._connected = self._vfd.connect()
+                if not self._connected:
+                    logger.error("Failed to connect to VFD display")
+            except PermissionError as e:
+                logger.error(f"PermissionError: Cannot open serial port (maybe already in use or insufficient permissions): {e}")
+                self._connected = False
+            except Exception as e:
+                logger.error(f"Exception during VFD connect: {e}")
+                self._connected = False
+
+    def _ensure_connection(self):
+        """Ensure the VFD is connected before any operation"""
+        if not (self._vfd and self._vfd.is_connected()):
+            self._connected = False
+            self._connect()
+
+    def test_connection(self) -> bool:
+        """Test VFD display connection"""
+        with self._lock:
+            self._ensure_connection()
+            if not self._connected:
+                return False
+            try:
+                self._vfd.clear_display()
+                self._vfd.send_text(WELCOME_MESSAGE)
+                return True
+            except Exception as e:
+                logger.error(f"VFD connection test failed: {e}")
+                self._connected = False
+                return False
+
+    def display_welcome(self) -> bool:
+        """Display welcome message on VFD"""
+        with self._lock:
+            self._ensure_connection()
+            if not self._connected:
+                return False
+            try:
+                self._vfd.clear_display()
+                self._vfd.send_text(WELCOME_MESSAGE)
+                return True
+            except Exception as e:
+                logger.error(f"Error displaying welcome message: {e}")
+                self._connected = False
+                return False
+
+    def display_order(self, order_items: List[Dict[str, str]]) -> bool:
+        """Display order on VFD"""
+        if not order_items:
+            logger.warning("No order items to display")
+            return False
+
+        with self._lock:
+            self._ensure_connection()
+            if not self._connected:
+                return False
+            try:
+                self._vfd.clear_display()
+
+                lines = []
+                total = 0
+
+                for item in order_items:
+                    name = str(item.get("name", "Unknown"))
+                    price = float(item.get('price', 0))
+                    quantity = int(item.get('quantity', 1))
+                    item_total = price * quantity
+                    total += item_total
+
+                    formatted_name = self._format_name(name)
+                    formatted_price = self._format_money(item_total)
+                    lines.append(f"{formatted_name}: {formatted_price} Ar")
+
+                # Add total line
+                total_formatted = self._format_money(total)
+                lines.append(f"TOTAL = {total_formatted} Ar")
+
+                self._vfd.send_multiline_text(lines)
+                return True
+
+            except Exception as e:
+                logger.error(f"Error displaying order: {e}")
+                self._connected = False
+                return False
+            
+    def deconnect(self):
+        self._vfd.disconnect()
+        self._connected = False
+
+
+    @staticmethod
+    def _format_money(value: float) -> str:
+        """Format a float value as money with thousands separator"""
+        return f"{value:,.0f}".replace(',', ' ')
+
+    @staticmethod
+    def _format_name(name: str) -> str:
+        """Format name to fit VFD display constraints"""
+        if len(name) >= 7:
+            return name[:7]
+        return name.ljust(5)
+
+# Global instances
+current_display_thread: Optional[threading.Thread] = None
+stop_display_event = threading.Event()
+orders: List[Dict[str, str]] = []
+vfd_manager = VFDManager()
+
 app = Flask(__name__)
 CORS(app)
 
-def money_format(value: float) -> str:
-    """Format a float value as money with thousands separator"""
-    return f"{value:,.0f}".replace(',', ' ')
-
-def name_format(name: str) -> str:
-    """Format name to fit VFD display constraints"""
-    if len(name) >= 7:
-        return str(name[:7])
-    return name.ljust(5)
-
-def timer_thread(stop_event: threading.Event) -> None:
-    """Thread to handle periodic tasks"""
-    t = 0
-    while not stop_event.is_set():
+def validate_order_data(data: List[Dict]) -> bool:
+    """Validate order data structure"""
+    if not isinstance(data, list):
+        return False
+    
+    for item in data:
+        if not isinstance(item, dict):
+            return False
+        
+        # Check required fields
+        if 'name' not in item or 'price' not in item:
+            return False
+        
+        # Validate data types
         try:
-            if t > 10:
-                stop_event.set()
-            t += 1
-            pass
-        except Exception as e:
-            logger.error(f"Error in timer thread: {e}")
-        finally:
-            stop_event.wait(1)  # Wait for 1 second before next iteration
+            float(item.get('price', 0))
+            int(item.get('quantity', 1))
+        except (ValueError, TypeError):
+            return False
+    
+    return True
+
 def display_order_thread(order: List[Dict[str, str]], stop_event: threading.Event) -> None:
     """Display order on VFD in a separate thread"""
-    # timer_thread(stop_event)
-    if orders != order:
-        orders.clear()
-        orders.extend(order)
-    vfd = VFD220()
-    if not vfd.connect():
-        logger.error("Failed to connect to VFD display")
-        return
+    global orders
     
     try:
-        vfd.clear_display()
-        line = ""
-        total = 0
-        for item in orders:
-            line = f"{name_format(item.get("name"))}: {money_format(float(item.get('price', 0)) * int(item.get('quantity', 1)))} Ar"
-            # vfd.clear_display()
-            total += round(float(item.get('price', 0)) * int(item.get('quantity', 1)))
-        # total avec separation de milliers
-        total = money_format(total)
-        line += f"\nTOTAL = {total} Ar"
-        vfd.send_multiline_text(line.split('\n'))
-        # vfd.scroll_text_boucle(line, scroll_speed=0.2, scroll_all_lines=False,stop_event = stop_event)
+        # Update global orders
+        orders.clear()
+        orders.extend(order)
+        
+        # Display the order
+        success = vfd_manager.display_order(order)
+        if not success:
+            logger.error("Failed to display order on VFD")
+        
+        # Wait for timeout or stop event
+        stop_event.wait(DISPLAY_TIMEOUT)
         
     except Exception as e:
-        logger.error(f"Error displaying order: {e}")
-    finally:
-        vfd.disconnect()
+        logger.error(f"Error in display thread: {e}")
 
 def display_order_on_vfd(order: List[Dict[str, str]]) -> bool:
     """Start displaying order on VFD in a thread"""
     global current_display_thread, stop_display_event
-    
+
+    if not validate_order_data(order):
+        logger.error("Invalid order data provided")
+        return False
+
     try:
         if current_display_thread and current_display_thread.is_alive():
-            logger.info("Stopping previous display")
+            logger.info("Stopping previous display thread")
             stop_display_event.set()
             current_display_thread.join(timeout=2)
-        
+            stop_display_event.clear()
+
         stop_display_event = threading.Event()
         current_display_thread = threading.Thread(
             target=display_order_thread,
             args=(order, stop_display_event),
-            daemon=True
+            daemon=True,
+            name="VFD-Display-Thread"
         )
         current_display_thread.start()
-        
-        logger.info("Started new display thread")
+
+        logger.info(f"Started new display thread for {len(order)} items")
         return True
-        
+
     except Exception as e:
         logger.error(f"Error starting display thread: {e}")
         return False
-
-def display_welcomme_message() -> None:
-    """Display welcome message on VFD"""
-    vfd = VFD220()
-    if not vfd.connect():
-        logger.error("Failed to connect to VFD display")
-        return
-    
-    try:
-        vfd.clear_display()
-        vfd.send_text(WELCOME_MESSAGE)
-    except Exception as e:
-        logger.error(f"Error displaying welcome message: {e}")
-    finally:
-        vfd.disconnect()
 
 @app.route('/api/welcome', methods=['GET'])
 def welcome():
     """API endpoint to display welcome message"""
     try:
-        display_welcomme_message()
-        return jsonify({"status": "success", "message": "Welcome message displayed"}), 200
+        success = vfd_manager.display_welcome()
+        if success:
+            return jsonify({"status": "success", "message": "Welcome message displayed"}), 200
+        else:
+            return jsonify({"status": "error", "message": "Failed to display welcome message"}), 500
     except Exception as e:
-        logger.error(f"Error displaying welcome message: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        logger.error(f"Error in welcome endpoint: {e}")
+        return jsonify({"status": "error", "message": "Internal server error"}), 500
 
 @app.route('/api/receive_order', methods=['POST'])
 def receive_order():
@@ -173,6 +262,9 @@ def receive_order():
         
         if not data:
             return jsonify({"error": "No data provided"}), 400
+        
+        if not validate_order_data(data):
+            return jsonify({"error": "Invalid order data format"}), 400
         
         logger.info(f"Received order: {len(data)} items")
         
@@ -186,14 +278,42 @@ def receive_order():
             
     except Exception as e:
         logger.error(f"Error processing order: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({"status": "error", "message": "Internal server error"}), 500
+
+@app.route('/api/status', methods=['GET'])
+def status():
+    """API endpoint to check VFD status"""
+    try:
+        is_connected = vfd_manager.test_connection()
+        response = {
+            "status": "success" if is_connected else "error",
+            "vfd_connected": is_connected,
+            "current_orders": len(orders)
+        }
+        if not is_connected:
+            response["message"] = (
+                "VFD not connected. "
+                "Possible reasons: COM port in use, access denied, or hardware not present. "
+                "Check that COM4 is available and not used by another program."
+            )
+        return jsonify(response), 200 if is_connected else 500
+    except Exception as e:
+        logger.error(f"Error checking status: {e}")
+        return jsonify({"status": "error", "message": "Internal server error"}), 500
 
 if __name__ == '__main__':
-    # Test VFD on startup
     logger.info("Testing VFD connection on startup...")
-    if test_vfd_display():
+    if vfd_manager.test_connection():
         logger.info("VFD test successful - starting Flask server")
+        vfd_manager.deconnect()
     else:
         logger.warning("VFD test failed - server will start but display may not work")
     
-    app.run(port=8086, debug=True)
+    try:
+        app.run(port=8086, debug=True)
+    except KeyboardInterrupt:
+        logger.info("Server shutdown requested")
+        if current_display_thread and current_display_thread.is_alive():
+            stop_display_event.set()
+            current_display_thread.join(timeout=2)
+        logger.info("Server stopped")

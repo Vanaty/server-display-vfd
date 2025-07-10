@@ -89,6 +89,18 @@ class VFD220:
         
         self.logger.error(f"Error: Could not open {self.port} at any baud rate")
         return False
+    
+    def is_connected(self):
+        """Check if the serial port is open and handle disconnection gracefully"""
+        try:
+            if self.ser and self.ser.is_open:
+                self.ser.in_waiting  # Check if the port is still responsive
+                return True
+            else:
+                return False
+        except (serial.SerialException, OSError) as e:
+            self.logger.warning(f"Serial port disconnected or unresponsive: {e}")
+            return False
 
     def disconnect(self):
         """Close serial connection"""
@@ -138,7 +150,9 @@ class VFD220:
                 else:
                     display_lines.append(' ' * self.display_width)  # Empty line
             self.clear_display()
+            time.sleep(0.1)
             for m in display_lines:
+                time.sleep(0.1)
                 self.send_text(m)
             self.logger.debug(f"Sent multiline text: {display_lines}")
         except Exception as e:
