@@ -15,7 +15,7 @@ def setup_logger() -> logging.Logger:
     """Configure logger with file and console handlers"""
     if not os.path.exists('logs'):
         os.makedirs('logs')
-    
+
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.INFO)
     
@@ -220,7 +220,7 @@ def display_order_on_vfd(order: List[Dict[str, str]]) -> bool:
 
     try:
         if current_display_thread and current_display_thread.is_alive():
-            logger.info("Stopping previous display thread")
+            logger.debug("Stopping previous display thread")
             stop_display_event.set()
             current_display_thread.join(timeout=2)
             stop_display_event.clear()
@@ -234,7 +234,7 @@ def display_order_on_vfd(order: List[Dict[str, str]]) -> bool:
         )
         current_display_thread.start()
 
-        logger.info(f"Started new display thread for {len(order)} items")
+        logger.debug(f"Started new display thread for {len(order)} items")
         return True
 
     except Exception as e:
@@ -266,7 +266,7 @@ def receive_order():
         if not validate_order_data(data):
             return jsonify({"error": "Invalid order data format"}), 400
         
-        logger.info(f"Received order: {len(data)} items")
+        logger.debug(f"Received order: {len(data)} items")
         
         # Display order on VFD
         success = display_order_on_vfd(data)
