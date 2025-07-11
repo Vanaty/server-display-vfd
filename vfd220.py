@@ -83,7 +83,7 @@ class VFD220:
             self.logger.info(f"Trying baud rate: {baud}")
             self.ser = self.open_serial_port(self.port, baud)
             if self.ser:
-                time.sleep(1)  # Wait for display to initialize
+                time.sleep(1)
                 return True
             time.sleep(1)
         
@@ -150,9 +150,7 @@ class VFD220:
                 else:
                     display_lines.append(' ' * self.display_width)  # Empty line
             self.clear_display()
-            time.sleep(0.1)
             for m in display_lines:
-                time.sleep(0.1)
                 self.send_text(m)
             self.logger.debug(f"Sent multiline text: {display_lines}")
         except Exception as e:

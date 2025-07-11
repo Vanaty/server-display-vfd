@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import logging
 import os
+from datetime import datetime, timezone
 import threading
 import time
 from typing import List, Dict, Optional
@@ -49,6 +50,7 @@ class VFDManager:
 
     def __init__(self):
         self._lock = threading.Lock()
+        self._dates = []
         self._vfd = VFD220()
         self._connected = False
         self._connect()
@@ -90,6 +92,7 @@ class VFDManager:
 
     def display_welcome(self) -> bool:
         """Display welcome message on VFD"""
+        self._dates.clear()
         with self._lock:
             self._ensure_connection()
             if not self._connected:
@@ -102,13 +105,22 @@ class VFDManager:
                 logger.error(f"Error displaying welcome message: {e}")
                 self._connected = False
                 return False
-
+    
+    def exist_date_sup(self,date_verif):
+        for date in self._dates:
+            if date_verif < date:
+                return True
+        return False
+    
     def display_order(self, order_items: List[Dict[str, str]]) -> bool:
         """Display order on VFD"""
         if not order_items:
             logger.warning("No order items to display")
             return False
-
+        if (self.exist_date_sup(VFDManager._to_date(order_items[1]['date']))):
+            logger.warning("Order date is earlier than the last displayed order, skipping display")
+            return False
+        
         with self._lock:
             self._ensure_connection()
             if not self._connected:
@@ -118,6 +130,8 @@ class VFDManager:
 
                 lines = []
                 total = 0
+                
+                self._dates.append(VFDManager._to_date(order_items[1]['date']))
 
                 for item in order_items:
                     name = str(item.get("name", "Unknown"))
@@ -158,6 +172,16 @@ class VFDManager:
         if len(name) >= 7:
             return name[:7]
         return name.ljust(5)
+    
+    @staticmethod
+    def _to_date(date_str: str) -> str:
+        """Convert date string to ISO format"""
+        try:
+            dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            return dt
+        except ValueError:
+            logger.error(f"Invalid date format: {date_str}")
+            return date_str
 
 # Global instances
 current_display_thread: Optional[threading.Thread] = None
